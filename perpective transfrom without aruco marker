@@ -1,0 +1,80 @@
+import cv2
+import numpy as np
+import argparse
+import sys
+
+def order_points_by_location(corners, ids):
+    """
+    Orders the detected markers based on their spatial location in the image,
+    not their ID. This is a more robust method.
+    
+    Returns a sorted array of the four marker corners: TL, TR, BR, BL.
+    """
+    marker_info = [(corners[i], ids[i]) for i in range(len(ids))]
+    
+    centers = {}
+    for c, id in marker_info:
+        center_x = np.mean(c[0][:, 0])
+        center_y = np.mean(c[0][:, 1])
+        centers[int(id[0])] = (c, (center_x, center_y))
+
+    tl_marker = min(centers.values(), key=lambda p: p[1][0] + p[1][1])
+    br_marker = max(centers.values(), key=lambda p: p[1][0] + p[1][1])
+    tr_marker = min(centers.values(), key=lambda p: p[1][0] - p[1][1])
+    bl_marker = max(centers.values(), key=lambda p: p[1][0] - p[1][1])
+
+    src_pts = np.array([
+        tl_marker[0][0][0],
+        tr_marker[0][0][1],
+        br_marker[0][0][2],
+        bl_marker[0][0][3]
+    ], dtype="float32")
+
+    return src_pts
+
+def main():
+    parser = argparse.ArgumentParser(description="ArUco Perspective Transform")
+    parser.add_argument("--image", required=True, help="Path to input image with four ArUco markers")
+    args = parser.parse_args()
+
+    img = cv2.imread(args.image)
+    if img is None:
+        return
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100)
+    params = cv2.aruco.DetectorParameters_create()
+
+    corners, ids, rejected_img_points = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
+
+    if ids is None or len(ids) != 4:
+        return
+
+    print("Detected marker IDs:", ids.flatten())
+
+    try:
+        src_pts = order_points_by_location(corners, ids)
+        
+        width = int(max(np.linalg.norm(src_pts[1] - src_pts[0]), np.linalg.norm(src_pts[2] - src_pts[3])))
+        height = int(max(np.linalg.norm(src_pts[3] - src_pts[0]), np.linalg.norm(src_pts[2] - src_pts[1])))
+
+        dst_pts = np.array([
+            [0, 0],
+            [width - 1, 0],
+            [width - 1, height - 1],
+            [0, height - 1]
+        ], dtype="float32")
+
+        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        warped = cv2.warpPerspective(img, M, (width, height))
+
+        cv2.imshow("Warped Image", warped)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    except ValueError:
+        return
+
+if __name__ == "__main__":
+    main()
