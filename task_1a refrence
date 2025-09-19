@@ -1,0 +1,181 @@
+import cv2
+import numpy as np
+import argparse
+import sys
+
+def order_points_by_location(corners, ids):
+    """
+    Orders the detected markers based on their spatial location in the image,
+    not their ID. This is a more robust method.
+    
+    Returns a sorted array of the four marker corners: TL, TR, BR, BL.
+    """
+    marker_info = [(corners[i], ids[i]) for i in range(len(ids))]
+    
+    centers = {}
+    for c, id in marker_info:
+        center_x = np.mean(c[0][:, 0])
+        center_y = np.mean(c[0][:, 1])
+        centers[int(id[0])] = (c, (center_x, center_y))
+
+    tl_marker = min(centers.values(), key=lambda p: p[1][0] + p[1][1])
+    br_marker = max(centers.values(), key=lambda p: p[1][0] + p[1][1])
+    tr_marker = min(centers.values(), key=lambda p: p[1][0] - p[1][1])
+    bl_marker = max(centers.values(), key=lambda p: p[1][0] - p[1][1])
+
+    src_pts = np.array([
+        tl_marker[0][0][0],
+        tr_marker[0][0][1],
+        br_marker[0][0][2],
+        bl_marker[0][0][3]
+    ], dtype="float32")
+
+    return src_pts
+
+def detect_infected_plants(image):
+    """
+    Detects infected plants in a cropped plant region based on color.
+    """
+    # Convert the image to HSV color space
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    # Define color range for brown/yellow (infected plants)
+    lower_brown = np.array([10, 50, 50])
+    upper_brown = np.array([40, 255, 255])
+    
+    # Create a mask for the brown color
+    brown_mask = cv2.inRange(hsv, lower_brown, upper_brown)
+    
+    # Calculate the total number of brown pixels in the region
+    total_brown_pixels = cv2.countNonZero(brown_mask)
+
+    # Define a threshold for detection. If more than 5% of the region's
+    # pixels are brown, it indicates an infected plant.
+    threshold = 0.05 * image.shape[0] * image.shape[1]
+
+    if total_brown_pixels > threshold:
+        return True
+    else:
+        return False
+
+def main():
+    parser = argparse.ArgumentParser(description="ArUco Perspective Transform and ROI Cropping")
+    parser.add_argument("--image", required=True, help="Path to input image with four ArUco markers")
+    args = parser.parse_args()
+
+    img = cv2.imread(args.image)
+    if img is None:
+        return
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_100)
+    params = cv2.aruco.DetectorParameters_create()
+
+    corners, ids, rejected_img_points = cv2.aruco.detectMarkers(gray, aruco_dict, parameters=params)
+
+    if ids is None or len(ids) != 4:
+        return
+
+    print("Detected marker IDs:", ids.flatten())
+
+    try:
+        src_pts = order_points_by_location(corners, ids)
+        
+        width = int(max(np.linalg.norm(src_pts[1] - src_pts[0]), np.linalg.norm(src_pts[2] - src_pts[3])))
+        height = int(max(np.linalg.norm(src_pts[3] - src_pts[0]), np.linalg.norm(src_pts[2] - src_pts[1])))
+
+        dst_pts = np.array([
+            [0, 0],
+            [width - 1, 0],
+            [width - 1, height - 1],
+            [0, height - 1]
+        ], dtype="float32")
+
+        M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+        warped = cv2.warpPerspective(img, M, (width, height))
+
+        # Define the two blocks (ROIs) to be cropped
+        # block 1: top-left x=122, y=444. bottom-right x=360, y=685
+        x1_block1, y1_block1 = 122, 444
+        x2_block1, y2_block1 = 360, 685
+        
+        # block 2: top-left x=498, y=444. bottom-right x=736, y=685
+        x1_block2, y1_block2 = 498, 444
+        x2_block2, y2_block2 = 736, 685
+
+        # Crop block 1
+        block1_img = warped[y1_block1:y2_block1, x1_block1:x2_block1]
+        
+        # Crop block 2
+        block2_img = warped[y1_block2:y2_block2, x1_block2:x2_block2]
+
+        # Display the warped image and the two cropped blocks
+        cv2.imshow("Warped Image", warped)
+        cv2.imshow("Block 1", block1_img)
+        cv2.imshow("Block 2", block2_img)
+
+        # --- INFECTED PLANT DETECTION LOGIC ---
+        
+        # Calculate plant regions within each block (3 vertical plants)
+        block_height = block1_img.shape[0]
+        plant_height = block_height // 3
+        
+        # Analyze Block 1 (Plants A, B, C)
+        infected_plants_block1 = []
+        
+        # Plant A
+        plant_a_region = block1_img[0:plant_height, :]
+        if detect_infected_plants(plant_a_region):
+            infected_plants_block1.append("A")
+            
+        # Plant B
+        plant_b_region = block1_img[plant_height:2*plant_height, :]
+        if detect_infected_plants(plant_b_region):
+            infected_plants_block1.append("B")
+            
+        # Plant C
+        plant_c_region = block1_img[2*plant_height:block_height, :]
+        if detect_infected_plants(plant_c_region):
+            infected_plants_block1.append("C")
+
+        # Analyze Block 2 (Plants D, E, F)
+        infected_plants_block2 = []
+        
+        # Plant D
+        plant_d_region = block2_img[0:plant_height, :]
+        if detect_infected_plants(plant_d_region):
+            infected_plants_block2.append("D")
+            
+        # Plant E
+        plant_e_region = block2_img[plant_height:2*plant_height, :]
+        if detect_infected_plants(plant_e_region):
+            infected_plants_block2.append("E")
+            
+        # Plant F
+        plant_f_region = block2_img[2*plant_height:block_height, :]
+        if detect_infected_plants(plant_f_region):
+            infected_plants_block2.append("F")
+
+        # Print the IDs of the infected plants as requested
+        print("\n--- Detection Results ---")
+        if infected_plants_block1:
+            print(f"Infected plant in Block 1: P1{''.join(infected_plants_block1)}")
+        else:
+            print("No infected plants found in Block 1.")
+        
+        if infected_plants_block2:
+            print(f"Infected plant in Block 2: P2{''.join(infected_plants_block2)}")
+        else:
+            print("No infected plants found in Block 2.")
+
+        # --- END OF DETECTION LOGIC ---
+        
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    except ValueError:
+        return
+
+if __name__ == "__main__":
+    main()
